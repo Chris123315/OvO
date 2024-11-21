@@ -1,0 +1,425 @@
+      }
+
+      function transformResponseData(params, data) {
+        var resp = {
+          text: data.body,
+          rc: data.rc || 200,
+          headers: data.headers,
+          oauthApprovalUrl: data.oauthApprovalUrl,
+          oauthError: data.oauthError,
+          oauthErrorText: data.oauthErrorText,
+          errors: []
+        };
+        if (resp.rc < 200 || resp.rc >= 400) {
+          resp.errors = [resp.rc + " Error"]
+        } else {
+          if (resp.text) {
+            if (resp.rc >= 300 && resp.rc < 400) {
+              params.CONTENT_TYPE = "TEXT"
+            }
+            switch (params.CONTENT_TYPE) {
+              case "JSON":
+              case "FEED":
+                resp.data = gadgets.json.parse(resp.text);
+                if (!resp.data) {
+                  resp.errors.push("500 Failed to parse JSON");
+                  resp.rc = 500;
+                  resp.data = null
+                }
+                break;
+              case "DOM":
+                var dom;
+                if (typeof ActiveXObject != "undefined") {
+                  dom = new ActiveXObject("Microsoft.XMLDOM");
+                  dom.async = false;
+                  dom.validateOnParse = false;
+                  dom.resolveExternals = false;
+                  if (!dom.loadXML(resp.text)) {
+                    resp.errors.push("500 Failed to parse XML");
+                    resp.rc = 500
+                  } else {
+                    resp.data = dom
+                  }
+                } else {
+                  var parser = new DOMParser();
+                  dom = parser.parseFromString(resp.text, "text/xml");
+                  if ("parsererror" === dom.documentElement.nodeName) {
+                    resp.errors.push("500 Failed to parse XML");
+                    resp.rc = 500
+                  } else {
+                    resp.data = dom
+                  }
+                }
+                break;
+              default:
+                resp.data = resp.text;
+                break
+            }
+          }
+        }
+        return resp
+      }
+
+      function makeXhrRequest(realUrl, proxyUrl, callback, paramData, method, params, processResponseFunction, opt_headers) {
+        var xhr = makeXhr();
+        if (proxyUrl.indexOf("//") == 0) {
+          proxyUrl = document.location.protocol + proxyUrl
+        }
+        xhr.open(method, proxyUrl, true);
+        if (callback) {
+          xhr.onreadystatechange = gadgets.util.makeClosure(null, processResponseFunction, realUrl, callback, params, xhr)
+        }
+        if (paramData !== null) {
+          var contentTypeHeader = "Content-Type";
+          var contentType = "application/x-www-form-urlencoded";
+          if (typeof opt_headers === "string") {
+            contentType = opt_headers;
+            opt_headers = {}
+          }
+          var headers = opt_headers || {};
+          if (!headers[contentTypeHeader]) {
+            headers[contentTypeHeader] = contentType
+          }
+          for (var headerName in headers) {
+            xhr.setRequestHeader(headerName, headers[headerName])
+          }
+        }
+        xhr.send(paramData)
+      }
+
+      function respondWithPreload(postData, params, callback) {
+        if (gadgets.io.preloaded_ && postData.httpMethod === "GET") {
+          for (var i = 0; i < gadgets.io.preloaded_.length; i++) {
+            var preload = gadgets.io.preloaded_[i];
+            if (preload && (preload.id === postData.url)) {
+              delete gadgets.io.preloaded_[i];
+              if (preload.rc !== 200) {
+                callback({
+                  rc: preload.rc,
+                  errors: [preload.rc + " Error"]
+                })
+              } else {
+                if (preload.oauthState) {
+                  oauthState = preload.oauthState
+                }
+                var resp = {
+                  body: preload.body,
+                  rc: preload.rc,
+                  headers: preload.headers,
+                  oauthApprovalUrl: preload.oauthApprovalUrl,
+                  oauthError: preload.oauthError,
+                  oauthErrorText: preload.oauthErrorText,
+                  errors: []
+                };
+                callback(transformResponseData(params, resp))
+              }
+              return true
+            }
+          }
+        }
+        return false
+      }
+
+      function init(configuration) {
+        config = configuration["core.io"] || {}
+      }
+      gadgets.config.register("core.io", null, init);
+      return {
+        makeRequest: function(url, callback, opt_params) {
+          var params = opt_params || {};
+          var httpMethod = params.METHOD || "GET";
+          var refreshInterval = params.REFRESH_INTERVAL;
+          var auth, st;
+          if (params.AUTHORIZATION && params.AUTHORIZATION !== "NONE") {
+            auth = params.AUTHORIZATION.toLowerCase();
+            st = shindig.auth.getSecurityToken()
+          } else {
+            if (httpMethod === "GET" && refreshInterval === undefined) {
+              refreshInterval = 3600
+            }
+          }
+          var signOwner = true;
+          if (typeof params.OWNER_SIGNED !== "undefined") {
+            signOwner = params.OWNER_SIGNED
+          }
+          var signViewer = true;
+          if (typeof params.VIEWER_SIGNED !== "undefined") {
+            signViewer = params.VIEWER_SIGNED
+          }
+          var headers = params.HEADERS || {};
+          if (httpMethod === "POST" && !headers["Content-Type"]) {
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+          }
+          var urlParams = gadgets.util.getUrlParameters();
+          var paramData = {
+            url: url,
+            httpMethod: httpMethod,
+            headers: gadgets.io.encodeValues(headers, false),
+            postData: params.POST_DATA || "",
+            authz: auth || "",
+            st: st || "",
+            contentType: params.CONTENT_TYPE || "TEXT",
+            numEntries: params.NUM_ENTRIES || "3",
+            getSummaries: !!params.GET_SUMMARIES,
+            signOwner: signOwner,
+            signViewer: signViewer,
+            gadget: urlParams.url,
+            container: urlParams.container || urlParams.synd || "default",
+            bypassSpecCache: gadgets.util.getUrlParameters()["nocache"] || "",
+            getFullHeaders: !!params.GET_FULL_HEADERS
+          };
+          if (auth === "oauth" || auth === "signed") {
+            if (gadgets.io.oauthReceivedCallbackUrl_) {
+              paramData.OAUTH_RECEIVED_CALLBACK = gadgets.io.oauthReceivedCallbackUrl_;
+              gadgets.io.oauthReceivedCallbackUrl_ = null
+            }
+            paramData.oauthState = oauthState || "";
+            for (var opt in params) {
+              if (params.hasOwnProperty(opt)) {
+                if (opt.indexOf("OAUTH_") === 0) {
+                  paramData[opt] = params[opt]
+                }
+              }
+            }
+          }
+          var proxyUrl = config.jsonProxyUrl.replace("%host%", document.location.host);
+          if (!respondWithPreload(paramData, params, callback)) {
+            if (httpMethod === "GET" && refreshInterval > 0) {
+              var extraparams = "?refresh=" + refreshInterval + "&" + gadgets.io.encodeValues(paramData);
+              makeXhrRequest(url, proxyUrl + extraparams, callback, null, "GET", params, processResponse)
+            } else {
+              makeXhrRequest(url, proxyUrl, callback, gadgets.io.encodeValues(paramData), "POST", params, processResponse)
+            }
+          }
+        },
+        makeNonProxiedRequest: function(relativeUrl, callback, opt_params, opt_headers) {
+          var params = opt_params || {};
+          makeXhrRequest(relativeUrl, relativeUrl, callback, params.POST_DATA, params.METHOD, params, processNonProxiedResponse, opt_headers)
+        },
+        clearOAuthState: function() {
+          oauthState = undefined
+        },
+        encodeValues: function(fields, opt_noEscaping) {
+          var escape = !opt_noEscaping;
+          var buf = [];
+          var first = false;
+          for (var i in fields) {
+            if (fields.hasOwnProperty(i) && !/___$/.test(i)) {
+              if (!first) {
+                first = true
+              } else {
+                buf.push("&")
+              }
+              buf.push(escape ? encodeURIComponent(String(i)) : i);
+              buf.push("=");
+              buf.push(escape ? encodeURIComponent(String(fields[i])) : fields[i])
+            }
+          }
+          return buf.join("")
+        },
+        getProxyUrl: function(url, opt_params) {
+          var params = opt_params || {};
+          var refresh = params.REFRESH_INTERVAL;
+          if (refresh === undefined) {
+            refresh = "3600"
+          }
+          var urlParams = gadgets.util.getUrlParameters();
+          var rewriteMimeParam = params.rewriteMime ? "&rewriteMime=" + encodeURIComponent(String(params.rewriteMime)) : "";
+          var ret = config.proxyUrl.replace("%url%", encodeURIComponent(url)).replace("%host%", document.location.host).replace("%rawurl%", url).replace("%refresh%", encodeURIComponent(String(refresh))).replace("%gadget%", encodeURIComponent(urlParams.url)).replace("%container%", encodeURIComponent(urlParams.container || urlParams.synd || "default")).replace("%rewriteMime%", rewriteMimeParam);
+          if (ret.indexOf("//") == 0) {
+            ret = window.location.protocol + ret
+          }
+          return ret
+        }
+      }
+    }();
+    gadgets.io.RequestParameters = gadgets.util.makeEnum(["METHOD", "CONTENT_TYPE", "POST_DATA", "HEADERS", "AUTHORIZATION", "NUM_ENTRIES", "GET_SUMMARIES", "GET_FULL_HEADERS", "REFRESH_INTERVAL", "OAUTH_SERVICE_NAME", "OAUTH_USE_TOKEN", "OAUTH_TOKEN_NAME", "OAUTH_REQUEST_TOKEN", "OAUTH_REQUEST_TOKEN_SECRET", "OAUTH_RECEIVED_CALLBACK"]);
+    gadgets.io.MethodType = gadgets.util.makeEnum(["GET", "POST", "PUT", "DELETE", "HEAD"]);
+    gadgets.io.ContentType = gadgets.util.makeEnum(["TEXT", "DOM", "JSON", "FEED"]);
+    gadgets.io.AuthorizationType = gadgets.util.makeEnum(["NONE", "SIGNED", "OAUTH"]);;
+    tamings___.push(function(a) {
+      caja___.whitelistFuncs([
+        [gadgets.io, "encodeValues"],
+        [gadgets.io, "getProxyUrl"],
+        [gadgets.io, "makeRequest"]
+      ])
+    });;
+    (function() {
+      var i = null;
+      var j = {};
+      var f = gadgets.util.escapeString;
+      var d = {};
+      var h = {};
+      var e = "en";
+      var b = "US";
+      var a = 0;
+
+      function c() {
+        var l = gadgets.util.getUrlParameters();
+        for (var k in l) {
+          if (l.hasOwnProperty(k)) {
+            if (k.indexOf("up_") === 0 && k.length > 3) {
+              j[k.substr(3)] = String(l[k])
+            } else {
+              if (k === "country") {
+                b = l[k]
+              } else {
+                if (k === "lang") {
+                  e = l[k]
+                } else {
+                  if (k === "mid") {
+                    a = l[k]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      function g() {
+        for (var k in h) {
+          if (typeof j[k] === "undefined") {
+            j[k] = h[k]
+          }
+        }
+      }
+      gadgets.Prefs = function() {
+        if (!i) {
+          c();
+          g();
+          i = this
+        }
+        return i
+      };
+      gadgets.Prefs.setInternal_ = function(n, p) {
+        var o = false;
+        if (typeof n === "string") {
+          if (!j.hasOwnProperty(n) || j[n] !== p) {
+            o = true
+          }
+          j[n] = p
+        } else {
+          for (var m in n) {
+            if (n.hasOwnProperty(m)) {
+              var l = n[m];
+              if (!j.hasOwnProperty(m) || j[m] !== l) {
+                o = true
+              }
+              j[m] = l
+            }
+          }
+        }
+        return o
+      };
+      gadgets.Prefs.setMessages_ = function(k) {
+        d = k
+      };
+      gadgets.Prefs.setDefaultPrefs_ = function(k) {
+        h = k
+      };
+      gadgets.Prefs.prototype.getString = function(k) {
+        if (k === ".lang") {
+          k = "lang"
+        }
+        return j[k] ? f(j[k]) : ""
+      };
+      gadgets.Prefs.prototype.setDontEscape_ = function() {
+        f = function(l) {
+          return l
+        }
+      };
+      gadgets.Prefs.prototype.getInt = function(k) {
+        var l = parseInt(j[k], 10);
+        return isNaN(l) ? 0 : l
+      };
+      gadgets.Prefs.prototype.getFloat = function(k) {
+        var l = parseFloat(j[k]);
+        return isNaN(l) ? 0 : l
+      };
+      gadgets.Prefs.prototype.getBool = function(k) {
+        var l = j[k];
+        if (l) {
+          return l === "true" || l === true || !!parseInt(l, 10)
+        }
+        return false
+      };
+      gadgets.Prefs.prototype.set = function(k, l) {
+        throw new Error("setprefs feature required to make this call.")
+      };
+      gadgets.Prefs.prototype.getArray = function(n) {
+        var o = j[n];
+        if (o) {
+          var k = o.split("|");
+          for (var m = 0, l = k.length; m < l;
+            ++m) {
+            k[m] = f(k[m].replace(/%7C/g, "|"))
+          }
+          return k
+        }
+        return []
+      };
+      gadgets.Prefs.prototype.setArray = function(k, l) {
+        throw new Error("setprefs feature required to make this call.")
+      };
+      gadgets.Prefs.prototype.getMsg = function(k) {
+        return d[k] || ""
+      };
+      gadgets.Prefs.prototype.getCountry = function() {
+        return b
+      };
+      gadgets.Prefs.prototype.getLang = function() {
+        return e
+      };
+      gadgets.Prefs.prototype.getModuleId = function() {
+        return a
+      }
+    })();;
+    tamings___.push(function(a) {
+      caja___.whitelistCtors([
+        [gadgets, "Prefs", Object]
+      ]);
+      caja___.whitelistMeths([
+        [gadgets.Prefs, "getArray"],
+        [gadgets.Prefs, "getBool"],
+        [gadgets.Prefs, "getCountry"],
+        [gadgets.Prefs, "getFloat"],
+        [gadgets.Prefs, "getInt"],
+        [gadgets.Prefs, "getLang"],
+        [gadgets.Prefs, "getMsg"],
+        [gadgets.Prefs, "getString"],
+        [gadgets.Prefs, "set"],
+        [gadgets.Prefs, "setArray"]
+      ])
+    });;
+    var JSON = window.JSON || gadgets.json;
+    var _IG_Prefs = (function() {
+      var a = null;
+      var b = function() {
+        if (!a) {
+          a = new gadgets.Prefs();
+          a.setDontEscape_()
+        }
+        return a
+      };
+      b._parseURL = gadgets.Prefs.parseUrl;
+      return b
+    })();
+
+    function _IG_Fetch_wrapper(b, a) {
+      b(a.data ? a.data : "")
+    }
+
+    function _IG_FetchContent(b, g, c) {
+      var f = c || {};
+      if (f.refreshInterval) {
+        f.REFRESH_INTERVAL = f.refreshInterval
+      } else {
+        f.REFRESH_INTERVAL = 3600
+      }
+      for (var e in f) {
+        var d = f[e];
+        delete f[e];
+        f[e.toUpperCase()] = d
+      }
+      var a = gadgets.util.makeClosure(null, _IG_Fetch_wrapper, g);
